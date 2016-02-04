@@ -92,7 +92,7 @@ class Fieldmanager_Term_Meta_Migration_CLI extends WP_CLI_Command {
 		WP_CLI::warning( "Muting user-generated PHP notices for this command in order to hide deprecation notices" );
 		error_reporting( error_reporting() & ~E_USER_NOTICE );
 
-		$terms = $this->get_terms_with_fm_term_meta();
+		$terms = $this->get_terms_with_fm_term_meta($dry_run);
 		foreach ( $terms as $term ) {
 			if ( $verbose ) {
 				WP_CLI::line( "Processing {$term->taxonomy} `{$term->name}' ({$term->slug}, {$term->term_id})" );
@@ -234,7 +234,7 @@ class Fieldmanager_Term_Meta_Migration_CLI extends WP_CLI_Command {
 	 *
 	 * @return array Term objects.
 	 */
-	protected function get_terms_with_fm_term_meta() {
+	protected function get_terms_with_fm_term_meta($dry_run) {
 		$posts = $this->get_term_meta_posts();
 		$terms = array();
 
@@ -249,6 +249,12 @@ class Fieldmanager_Term_Meta_Migration_CLI extends WP_CLI_Command {
 			}
 
 			$term = get_term( intval( $matches[1] ), $matches[2] );
+
+			if(! $term ){
+				//Check if we couldn't find it because wordpress 4.4 already split it
+				$term = $this->find_split( intval( $matches[1] ), $matches[2] , $dry_run);
+			}
+
 			if ( ! $term || is_wp_error( $term ) ) {
 				WP_CLI::warning( "Term meta post found for invalid term; perhaps this was an old taxonomy? Taxonomy: {$matches[2]}, Term ID: {$matches[1]}" );
 				continue;
@@ -261,5 +267,72 @@ class Fieldmanager_Term_Meta_Migration_CLI extends WP_CLI_Command {
 
 		return $terms;
 	}
+
+	/**
+	 * @param $old_term_id
+	 * @param $taxonomy
+	 * @param $dry_run
+	 * @return WP_Term Term object if found, false otherwise
+	 */
+	protected function find_split($old_term_id, $taxonomy, $dry_run){
+
+		WP_CLI::line( "\tLooking for possible split terms for the term_id: ".$old_term_id." (Tax: ".$taxonomy." )" );
+
+		$new_term	 = null;
+		$new_term_id = wp_get_split_term( $old_term_id, $taxonomy );
+
+		if($new_term_id){
+
+			$new_term = get_term( $new_term_id , $taxonomy );
+
+			if( $new_term || is_wp_error( $new_term) ){
+
+				$this->fix_term_meta_id( $new_term_id, $old_term_id, $taxonomy, $dry_run);
+			}
+
+		}
+
+		return $new_term;
+
+	}
+
+	/**
+	 * @param $new_id
+	 * @param $old_id
+	 * @param $taxonomy
+	 * @param $dry_run
+	 * @return bool True if the fm-term-meta post was updated succesfully, false otherwise
+	 */
+	protected function fix_term_meta_id($new_id, $old_id, $taxonomy, $dry_run){
+
+		global $wpdb;
+
+		$old_name 		= 'fm-term-meta-'. $old_id . "-" . $taxonomy;
+		$new_name 		= 'fm-term-meta-'. $new_id . '-' . $taxonomy;
+
+		$post_meta_row  = $wpdb->get_row( "SELECT `ID` FROM {$wpdb->posts} WHERE `post_name` = '".$old_name."'" );
+
+		if ( empty( $post_meta_row ) || is_wp_error( $post_meta_row)  ) {
+
+			WP_CLI::warning( "\tPrevious post meta NOT found");
+			return false;
+		}
+
+
+		WP_CLI::line( "\tNew term and previous post meta found. Updating post ID {$post_meta_row->ID} : Changing the name from ". $old_name ." to ". $new_name );
+		$updated_post_meta = array(
+			'ID'           => $post_meta_row->ID,
+			'post_title'   => $new_name,
+			'post_name'    => $new_name,
+		);
+
+		if($dry_run){
+			return true;
+		}
+
+		return wp_update_post( $updated_post_meta );
+
+	}
+
 
 }
